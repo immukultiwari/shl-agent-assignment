@@ -14,9 +14,13 @@ MODEL_NAME = "gemini-2.5-flash"
 CHROMA_PATH = os.getenv("CHROMA_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "shl_chroma_db"))
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 
-# FIXED: Replaced heavy PyTorch backend with lightweight ONNX Runtime execution
+# 1. Initialize the lightweight engine
 embedding_model = ONNXMiniLM_L6_V2()
 
+# 2. Monkey-patch the identifier method to match your local database signature
+embedding_model.name = lambda: "sentence_transformer"
+
+# 3. Safely open the collection
 collection = chroma_client.get_collection(
     name="shl_assessments",
     embedding_function=embedding_model
