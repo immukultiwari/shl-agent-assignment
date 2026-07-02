@@ -12,7 +12,7 @@ genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 # Run test_models.py and confirm one of these is listed for your key:
 # models/gemini-2.0-flash, models/gemini-3.5-flash
 # Using models/gemini-3.5-flash because it is available in your current model list.
-MODEL_NAME = "models/gemini-3.5-flash"
+MODEL_NAME = "gemini-2.0-flash"
 
 CHROMA_PATH = os.getenv("CHROMA_PATH", "./data/shl_chroma_db")
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
