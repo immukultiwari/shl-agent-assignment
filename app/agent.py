@@ -10,7 +10,7 @@ genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 MODEL_NAME = "gemini-2.5-flash"
 
-CHROMA_PATH = os.getenv("CHROMA_PATH", "./data/shl_chroma_db")
+CHROMA_PATH = os.getenv("CHROMA_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "shl_chroma_db"))
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 embedding_model = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="all-MiniLM-L6-v2"
