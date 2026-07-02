@@ -172,9 +172,10 @@ Set end_of_conversation to true ONLY when the user explicitly confirms the final
     )
 
     try:
+        # FIXED: Changed from get_config to generation_config
         response = model.generate_content(
             formatted_history,
-            get_config=genai.GenerationConfig(
+            generation_config=genai.GenerationConfig(
                 response_mime_type="application/json",
                 temperature=0.1
             )
