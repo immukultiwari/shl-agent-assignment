@@ -2,7 +2,8 @@ import json
 import os
 import google.generativeai as genai
 import chromadb
-from chromadb.utils import embedding_functions
+# REMOVED: from chromadb.utils import embedding_functions (SentenceTransformer is heavy!)
+from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2  # ADDED: ONNX-backed embedding function
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,9 +13,10 @@ MODEL_NAME = "gemini-2.5-flash"
 
 CHROMA_PATH = os.getenv("CHROMA_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "shl_chroma_db"))
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
-embedding_model = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="all-MiniLM-L6-v2"
-)
+
+# FIXED: Replaced heavy PyTorch backend with lightweight ONNX Runtime execution
+embedding_model = ONNXMiniLM_L6_V2()
+
 collection = chroma_client.get_collection(
     name="shl_assessments",
     embedding_function=embedding_model
@@ -47,20 +49,17 @@ def build_retrieval_query(query: str, history: list) -> str:
     """
     Build a combined query from full conversation history.
     Querying only the last message loses context on follow-up turns.
-    E.g. turn 3 'Add personality tests' needs Java + mid-level context too.
     """
     all_user_messages = []
     for turn in history:
         if turn.get("role") == "user":
             all_user_messages.append(turn["content"])
     all_user_messages.append(query)
-    # Take last 4 user messages max to avoid query being too long
     combined = " ".join(all_user_messages[-4:])
     return combined[:500]  # ChromaDB query length safety cap
 
 
 def handle_chat(query: str, history: list) -> dict:
-
     # Build context-aware retrieval query from full conversation
     retrieval_query = build_retrieval_query(query, history)
 
@@ -171,7 +170,7 @@ Set end_of_conversation to true ONLY when the user explicitly confirms the final
     try:
         response = model.generate_content(
             formatted_history,
-            generation_config=genai.GenerationConfig(
+            get_config=genai.GenerationConfig(
                 response_mime_type="application/json",
                 temperature=0.1
             )
@@ -221,10 +220,6 @@ Set end_of_conversation to true ONLY when the user explicitly confirms the final
         else:
             user_reply = "An internal error occurred. Please try again."
 
-        # No fallback recommendations on error — ever
-        # Returning catalog items on error violates the hard eval:
-        # "items from catalog only in recommendations" requires LLM selection,
-        # not raw vector results dumped directly into the response
         return {
             "reply": user_reply,
             "recommendations": [],

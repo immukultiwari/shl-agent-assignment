@@ -1,7 +1,6 @@
 fastapi
-uvicorn[standard]
-gunicorn
-google-generativeai
+uvicorn
 chromadb
-sentence-transformers
+google-genai
+onnxruntime
 python-dotenv
