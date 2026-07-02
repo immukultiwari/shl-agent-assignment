@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Project Summary</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #f8f9fb; color: #1f2937; }
+    h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+    h2 { font-size: 1.25rem; margin-top: 2rem; color: #111827; }
+    pre { background: #111827; color: #f8fafc; padding: 16px; border-radius: 10px; overflow-x: auto; }
+    code { font-family: Consolas, Menlo, Monaco, monospace; font-size: 0.96rem; }
+  </style>
+</head>
+<body>
+  <h1>Project File Summary</h1>
+
+  <h2>app/main.py</h2>
+  <pre><code>from fastapi import FastAPI, HTTPException
+import os
+import threading
+from importlib import import_module
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from typing import List
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from app.agent import handle_chat
+
+app = FastAPI(title="SHL Assessment Recommender API")
+executor = ThreadPoolExecutor(max_workers=4)
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return """<!DOCTYPE html>
+<html lang=\"en\">... (omitted for brevity) ...</html>"""
+
+# --- Request Models ---
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[Message]
+
+# --- Response Models (this is what was missing) ---
+class Recommendation(BaseModel):
+    name: str
+    url: str
+    test_type: str
+
+class ChatResponse(BaseModel):
+    reply: str
+    recommendations: List[Recommendation]
+    end_of_conversation: bool
+
+# --- Endpoints ---
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+
+@app.on_event("startup")
+async def ensure_chroma_db():
+    """On startup, if the Chroma DB path is missing or empty, run ingest.py in background.
+
+    This helps demo deployments (free Render) where the filesystem starts empty.
+    """
+    chroma_path = os.getenv("CHROMA_PATH", "./data/shl_chroma_db")
+    try:
+        exists = os.path.exists(chroma_path) and bool(os.listdir(chroma_path))
+    except Exception:
+        exists = False
+
+    if not exists:
+        def run_ingest():
+            try:
+                print(f"Chroma DB at {chroma_path} missing or empty — running ingest.py...")
+                os.environ["CHROMA_PATH"] = chroma_path
+                ingest_mod = import_module("ingest")
+                ingest_mod.main()
+                print("Ingest finished successfully.")
+            except Exception as e:
+                print("Ingest failed:", e)
+
+        t = threading.Thread(target=run_ingest, daemon=True)
+        t.start()
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest):
+    try:
+        history = [{"role": msg.role, "content": msg.content} 
+                   for msg in request.messages]
+
+        if not history:
+            raise HTTPException(status_code=400, detail="Message history cannot be empty.")
+
+        if len(history) > 8:
+            return ChatResponse(
+                reply="We've reached the maximum conversation length. Here is the current shortlist.",
+                recommendations=[],
+                end_of_conversation=True
+            )
+
+        current_query = history[-1]["content"]
+        past_history = history[:-1]
+
+        try:
+            loop = asyncio.get_event_loop()
+            agent_response = await asyncio.wait_for(
+                loop.run_in_executor(executor, handle_chat, current_query, past_history),
+                timeout=25.0
+            )
+        except asyncio.TimeoutError:
+            return ChatResponse(
+                reply="I'm taking too long to respond. Could you simplify the query?",
+                recommendations=[],
+                end_of_conversation=False
+            )
+
+        return agent_response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unhandled error: {e}")
+        raise HTTPException(status_code=500, detail="Internal agent error.")</code></pre>
+
+  <h2>app/agent.py</h2>
+  <pre><code>import json
+import os
+import google.generativeai as genai
+import chromadb
+from chromadb.utils import embedding_functions
+from dotenv import load_dotenv
+
+load_dotenv()
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+MODEL_NAME = "models/gemini-3.5-flash"
+
+CHROMA_PATH = os.getenv("CHROMA_PATH", "./data/shl_chroma_db")
+chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+embedding_model = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name="all-MiniLM-L6-v2"
+)
+collection = chroma_client.get_collection(
+    name="shl_assessments",
+    embedding_function=embedding_model
+)
+
+KEY_TO_CODE = {
+    "Knowledge & Skills": "K",
+    "Personality & Behavior": "P",
+    "Ability & Aptitude": "A",
+    "Biodata & Situational Judgment": "B",
+    "Simulations": "S",
+    "Competencies": "C",
+    "Development & 360": "D",
+    "Assessment Exercises": "E",
+}
+
+def keys_to_test_type(keys_str: str) -> str:
+    if not keys_str:
+        return "K"
+    codes = []
+    for key in keys_str.split("|"):
+        key = key.strip()
+        if key in KEY_TO_CODE:
+            codes.append(KEY_TO_CODE[key])
+    return ",".join(codes) if codes else "K"
+
+
+def handle_chat(query: str, history: list) -> dict:
+    db_results = collection.query(
+        query_texts=[query],
+        n_results=15
+    )
+
+    retrieved_context = ""
+    for i in range(len(db_results['ids'][0])):
+        meta = db_results['metadatas'][0][i]
+        test_type = keys_to_test_type(meta.get('keys_raw', ''))
+        retrieved_context += (
+            f"Name: {meta.get('name', 'Unknown')} | "
+            f"URL: {meta.get('url', '')} | "
+            f"test_type: {test_type} | "
+            f"Duration: {meta.get('duration', 'N/A')} | "
+            f"Job Levels: {meta.get('job_levels', 'N/A')}\n"
+        )
+
+    system_instruction = f"""You are a specialist SHL Assessment Consultant. Your ONLY job is to help 
+... (omitted for brevity) ...
+"""
+
+    formatted_history = []
+    for turn in history:
+        role = "model" if turn["role"] == "assistant" else "user"
+        formatted_history.append({
+            "role": role,
+            "parts": [turn["content"]]
+        })
+
+    formatted_history.append({
+        "role": "user",
+        "parts": [f"User Query: {query}"]
+    })
+
+    model = genai.GenerativeModel(
+        model_name=MODEL_NAME,
+        system_instruction=system_instruction
+    )
+
+    try:
+        response = model.generate_content(
+            formatted_history,
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.1
+            )
+        )
+
+        raw = response.text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        result = json.loads(raw)
+        return {
+            "reply": result.get("reply", "Could you provide more details about the role?"),
+            "recommendations": result.get("recommendations", []),
+            "end_of_conversation": bool(result.get("end_of_conversation", False))
+        }
+
+    except json.JSONDecodeError as e:
+        print(f"JSON parse error: {e} | Raw: {response.text[:200]}")
+        return {
+            "reply": "I encountered a formatting issue. Could you rephrase your request?",
+            "recommendations": [],
+            "end_of_conversation": False
+        }
+    except Exception as e:
+        import traceback
+        msg = str(e)
+        print(f"Agent error: {msg}")
+        traceback.print_exc()
+
+        fallback_recs = []
+        try:
+            for i in range(min(5, len(db_results['ids'][0]))):
+                meta = db_results['metadatas'][0][i]
+                fallback_recs.append({
+                    "name": meta.get('name', 'Unknown'),
+                    "url": meta.get('url', ''),
+                    "test_type": keys_to_test_type(meta.get('keys_raw', ''))
+                })
+        except Exception:
+            fallback_recs = []
+
+        lower = msg.lower()
+        if 'quota' in lower or 'quota exceeded' in lower:
+            user_reply = (
+                "API quota exceeded for the configured Google model. "
+                "Enable billing or use a different API key/project, or try again later."
+            )
+        elif 'not found' in lower or '404' in lower:
+            user_reply = (
+                "Requested model not found for your project. Run `test_models.py` to list "
+                "available models and update `MODEL_NAME` accordingly."
+            )
+        elif 'timed out' in lower or 'timeout' in lower:
+            user_reply = "The model timed out. Try a shorter query or try again later."
+        else:
+            user_reply = "An internal error occurred. Please try again."
+
+        return {
+            "reply": user_reply,
+            "recommendations": fallback_recs,
+            "end_of_conversation": False
+        }
+</code></pre>
+
+  <h2>app/__init__.py</h2>
+
+  <h2>ingest.py</h2>
+  <pre><code>"""
+ingest.py — Rebuilds ChromaDB from scratch with correct metadata.
+Run with: .\venv\Scripts\python.exe ingest.py
+"""
+
+import json
+import os
+import chromadb
+from chromadb.utils import embedding_functions
+
+CATALOG_PATH = "./data/shl_catalog.json"
+CHROMA_PATH  = os.getenv("CHROMA_PATH", "./data/shl_chroma_db")
+COLLECTION   = "shl_assessments"
+BATCH_SIZE   = 50
+
+KEY_TO_CODE = {
+    "Knowledge & Skills":           "K",
+    "Personality & Behavior":       "P",
+    "Ability & Aptitude":           "A",
+    "Biodata & Situational Judgment": "B",
+    "Simulations":                  "S",
+    "Competencies":                 "C",
+    "Development & 360":            "D",
+    "Assessment Exercises":         "E",
+}
+
+EXCLUDED_ENTITY_IDS = {
+    "3930":   "Sales & Service Phone Solution",
+    "3931":   "Customer Service Phone Solution",
+    "3932":   "Sales & Service Phone Simulation",
+    "3934":   "Entry Level Cashier Solution",
+    "3935":   "Entry Level Customer Service (General) Solution",
+    "3936":   "Entry Level Hotel Front Desk Solution",
+    "3937":   "Entry Level Sales Solution",
+    "3938":   "Entry Level Technical Support Solution",
+    "4291":   "Manufac. & Indust. - Mechanical & Vigilance 8.0",
+    "4292":   "Manufacturing & Industrial - Mechanical Focus 8.0",
+    "4294":   "Manufacturing & Industrial - Vigilance Focus 8.0",
+    "4295":   "Manufacturing & Industrial - Essential Focus 8.0",
+}
+
+EXCLUDED_NAME_SUBSTRINGS = [
+    " Solution",
+]
+
+def is_in_scope(item: dict) -> bool:
+    if str(item.get("entity_id", "")) in EXCLUDED_ENTITY_IDS:
+        return False
+    name = item.get("name", "")
+    for substr in EXCLUDED_NAME_SUBSTRINGS:
+        if substr in name:
+            return False
+    if not item.get("description", "").strip():
+        return False
+    return True
+
+
+def keys_to_pipe_string(keys_list: list) -> str:
+    return "|".join(keys_list) if keys_list else ""
+
+
+def keys_to_codes(keys_list: list) -> str:
+    codes = [KEY_TO_CODE[k] for k in keys_list if k in KEY_TO_CODE]
+    seen = set()
+    unique = [c for c in codes if not (c in seen or seen.add(c))]
+    return ",".join(unique) if unique else "K"
+
+
+def build_embedding_text(item: dict) -> str:
+    return "\n".join([
+        f"Assessment Name: {item.get('name', '')}",
+        f"Test Types: {', '.join(item.get('keys', []))}",
+        f"Job Levels: {item.get('job_levels_raw', '')}",
+        f"Languages: {item.get('languages_raw', '')}",
+        f"Duration: {item.get('duration', 'N/A')}",
+        f"Description: {item.get('description', '')}",
+    ])
+
+
+def main():
+    print("Loading catalog...")
+    with open(CATALOG_PATH, "r", encoding="utf-8") as f:
+        catalog = json.load(f)
+    print(f"Total items in catalog : {len(catalog)}")
+
+    in_scope = [item for item in catalog if is_in_scope(item)]
+    print(f"In-scope items          : {len(in_scope)}")
+    print(f"Excluded                : {len(catalog) - len(in_scope)}")
+
+    excluded = [item for item in catalog if not is_in_scope(item)]
+    print("\n── Excluded items ──────────────────────────")
+    for item in excluded:
+        print(f"  [{item.get('entity_id')}] {item.get('name')}")
+    print("────────────────────────────────────────────\n")
+
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="all-MiniLM-L6-v2"
+    )
+
+    try:
+        client.delete_collection(name=COLLECTION)
+        print(f"Deleted existing collection '{COLLECTION}'")
+    except Exception:
+        print(f"No existing collection to delete")
+
+    collection = client.create_collection(
+        name=COLLECTION,
+        embedding_function=embedding_fn,
+        metadata={"hnsw:space": "cosine"}
+    )
+
+    ids, documents, metadatas = [], [], []
+
+    for item in in_scope:
+        entity_id = str(item.get("entity_id", "")).strip()
+        if not entity_id:
+            continue
+
+        ids.append(entity_id)
+        documents.append(build_embedding_text(item))
+        metadatas.append({
+            "name":            item.get("name", ""),
+            "url":             item.get("link", ""),
+            "keys_raw":        keys_to_pipe_string(item.get("keys", [])),
+            "test_type_codes": keys_to_codes(item.get("keys", [])),
+            "duration":        item.get("duration", "N/A"),
+            "job_levels":      item.get("job_levels_raw", ""),
+            "languages":       item.get("languages_raw", ""),
+            "description":     item.get("description", "")[:500],
+        })
+
+        if len(ids) >= BATCH_SIZE:
+            collection.add(ids=ids, documents=documents, metadatas=metadatas)
+            print(f"  Inserted batch of {len(ids)}...")
+            ids, documents, metadatas = [], [], []
+
+    if ids:
+        collection.add(ids=ids, documents=documents, metadatas=metadatas)
+        print(f"  Inserted final batch of {len(ids)}")
+
+    final_count = collection.count()
+    print(f"\nDone. Collection '{COLLECTION}' has {final_count} items.")
+
+    test = collection.query(query_texts=["Java developer assessment"], n_results=1)
+    print("\nSpot check result:")
+    print(f"  Name      : {test['metadatas'][0][0].get('name')}")
+    print(f"  test_type : {test['metadatas'][0][0].get('test_type_codes')}")
+    print(f"  keys_raw  : {test['metadatas'][0][0].get('keys_raw')}")
+    print(f"  url       : {test['metadatas'][0][0].get('url')}")
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+  <h2>test_models.py</h2>
+  <pre><code>import os
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+load_dotenv()
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+print("--- AVAILABLE MODELS FOR YOUR KEY ---")
+for m in genai.list_models():
+    if 'generateContent' in m.supported_generation_methods:
+        print(m.name)</code></pre>
+
+  <h2>notebook.ipynb</h2>
+  <pre><code># Notebook code cell 1
+import json
+import os
+import chromadb
+from chromadb.utils import embedding_functions
+
+filepath = "data/shl_catalog.json" # Adjust this if your json is in the root folder instead
+with open(filepath, 'r', encoding='utf-8') as file:
+    raw_catalog = json.load(file)
+
+documents = []
+metadatas = []
+ids = []
+
+for item in raw_catalog:
+    if not item.get("name") or not item.get("description"):
+        continue
+
+    job_levels = ", ".join(item.get("job_levels", []))
+    languages = ", ".join(item.get("languages", []))
+    keys = ", ".join(item.get("keys", []))
+
+    rich_text = (
+        f"Assessment Name: {item['name']}\n"
+        f"Description: {item['description']}\n"
+        f"Target Job Levels: {job_levels}\n"
+        f"Measured Skills/Keys: {keys}\n"
+        f"Supported Languages: {languages}\n"
+        f"Is Adaptive: {item.get('adaptive', 'no')}\n"
+        f"Duration: {item.get('duration', 'Not specified')}"
+    )
+    documents.append(rich_text)
+
+    metadatas.append({
+        "name": item["name"],
+        "url": item.get("link", ""),
+        "duration": item.get("duration", "Not specified"),
+        "test_type": "K" if "Knowledge & Skills" in keys else "P" if "Personality" in keys else "A"
+    })
+
+    ids.append(str(item["entity_id"]))
+
+print(f"Cleaned {len(documents)} assessments. Building database now...")
+
+chroma_client = chromadb.PersistentClient(path="./data/shl_chroma_db")
+embedding_model = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+
+collection = chroma_client.get_or_create_collection(
+    name="shl_assessments",
+    embedding_function=embedding_model
+)
+
+collection.add(
+    documents=documents,
+    metadatas=metadatas,
+    ids=ids
+)
+
+print("SUCCESS! Database built and saved locally.")
+
+# Notebook code cell 2
+import chromadb
+from chromadb.utils import embedding_functions
+
+chroma_client = chromadb.PersistentClient(path="./data/shl_chroma_db")
+embedding_model = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v6")
+collection = chroma_client.get_collection(name="shl_assessments", embedding_function=embedding_model)
+
+test_query = "I need an advanced assessment for a Java developer who knows microservices and cloud."
+
+results = collection.query(
+    query_texts=[test_query],
+    n_results=3
+)
+
+print("--- SEMANTIC SEARCH TEST RESULTS ---")
+for i in range(len(results['ids'][0])):
+    print(f"\nMatch #{i+1} (ID: {results['ids'][0][i]}):")
+    print(f"Name: {results['metadatas'][0][i]['name']}")
+    print(f"URL: {results['metadatas'][0][i]['url']}")
+    print(f"Duration: {results['metadatas'][0][i]['duration']}")</code></pre>
+
+  <h2>.gitignore</h2>
+
+  <h2>render.yaml</h2>
+
+  <h2>README_RENDER.md</h2>
+
+  <h2>requirements.txt</h2>
+
+  <h2>Procfile</h2>
+</body>
+</html>
