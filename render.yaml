@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     repo: https://github.com/immukultiwari/shl-agent-assignment.git
-    branch: main
+    branch: master  # Changed from main to match your git status branch
     buildCommand: pip install -r requirements.txt && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /health
@@ -12,5 +12,4 @@ services:
       - key: GOOGLE_API_KEY
         sync: false
       - key: CHROMA_PATH
-        value: /opt/render/project/data/shl_chroma_db
-        sync: false
+        value: ./data/shl_chroma_db  # Relative path pointing straight to your repo folder
