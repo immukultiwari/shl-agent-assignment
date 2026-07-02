@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-2.5-flash"
 
 CHROMA_PATH = os.getenv("CHROMA_PATH", "./data/shl_chroma_db")
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
