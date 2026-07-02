@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: shl-assessor
+    env: python
+    plan: free
+    repo: <your-github-repo-url>
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: CHROMA_PATH
+        value: /opt/render/project/data/shl_chroma_db
+        sync: false
+    disk: 
+      mountPath: /opt/render/project/data
+      sizeGB: 10
+      name: shl-data-disk
