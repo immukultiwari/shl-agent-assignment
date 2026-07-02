@@ -1,6 +1,1 @@
-Assessment Name: Workplace Health and Safety (New)
-Test Types: Knowledge & Skills
-Job Levels: Entry-Level, Graduate, Manager, Supervisor, Mid-Professional, Professional Individual Contributor,
-Languages: English (USA),
-Duration: 9 minutes
-Description: Multi-choice test that measures the knowledge of first aid, emergency safety measures, cleanliness and personal hygiene.resolve administrative issue
+invalid type: string "Assessment Name: Zabbix (New)\nTest Types: Knowledge & Skills\nJob Levels: Mid-Professional, Professional Individual Contributor,\nLanguages: English (USA),\nDuration: 9 minutes\nDescription: Multi-choice test that measures the knowledge of Zabbix architecture, data handling, monitoring and administration.", expected i64lected by the user.", expected a booleanin a given envir
